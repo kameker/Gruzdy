@@ -12,4 +12,16 @@ int main() {
   assert(!parseRevolutions("1.5", steps));
   assert(!parseRevolutions("5abc", steps));
   assert(!parseRevolutions("", steps));
+
+  MotorMove motor;
+  assert(motor.start(240));
+  motor.step();
+  assert(motor.busy());
+  motor.stop();
+  assert(!motor.busy());
+  motor.step();
+  assert(!motor.busy());
+  assert(motor.start(48));
+  for (int i = 0; i < 48; ++i) motor.step();
+  assert(!motor.busy());
 }
