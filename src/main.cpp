@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <esp_system.h>
 #include "move_command.h"
+#include "command_gate.h"
 
 // Измените оба пароля перед использованием устройства.
 constexpr char WIFI_NAME[] = "Gruzdy-ESP32";
@@ -14,35 +16,34 @@ constexpr uint32_t STEP_INTERVAL_US = 10000;
 constexpr uint32_t STEP_PULSE_US = 10;
 WebServer server(80);
 MotorMove motor;
-uint32_t lastStep = 0;
+portMUX_TYPE motorMux = portMUX_INITIALIZER_UNLOCKED;
+hw_timer_t* stepTimer = nullptr;
+uint32_t moveStartedAt = 0;
+CommandGate gate(0);
 
-const char PAGE[] PROGMEM = R"HTML(<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Управление двигателем</title><style>
-body{font:16px system-ui,sans-serif;background:#f2f5f9;color:#182335;margin:0;padding:24px}
-main{max-width:420px;margin:10vh auto;background:white;border-radius:16px;padding:24px;box-shadow:0 6px 30px #0001}
-h1{font-size:24px}label{display:block;margin:22px 0 8px}.row{display:flex;gap:8px}
-input{width:100%;min-width:0;box-sizing:border-box;font:inherit;padding:12px;border:1px solid #bac5d3;border-radius:8px}
-button{font:inherit;cursor:pointer;padding:12px 18px;border:0;border-radius:8px;background:#e7edf5;color:#182335}
-button:disabled{opacity:.5;cursor:default}.wide{width:100%;margin-top:12px}.start{background:#225ed6;color:white;font-weight:600}.stop{background:#bd2026;color:white;font-weight:700}
-#status{min-height:1.5em;color:#475569}</style></head><body><main>
-<h1>Управление двигателем</h1><label for="revs">Количество оборотов (1–1000)</label>
-<div class="row"><input id="revs" type="number" min="1" max="1000" step="1" value="5"><button id="minus" type="button" aria-label="Уменьшить">−</button><button id="plus" type="button" aria-label="Увеличить">+</button></div>
-<button id="direction" class="wide" type="button">Направление: по часовой</button>
-<button id="start" class="wide start" type="button">Вращать</button>
-<button id="stop" class="wide stop" type="button">Экстренный стоп</button><p id="status" role="status"></p>
-<script>
-let clockwise=true, busy=false, stopping=false, pendingMove=null; const input=document.getElementById('revs'), status=document.getElementById('status');
-const start=document.getElementById('start'), direction=document.getElementById('direction');
-function adjust(n){let v=Number(input.value); if(!Number.isInteger(v))v=1; input.value=Math.max(1,Math.min(1000,v+n));}
-document.getElementById('minus').onclick=()=>adjust(-1);document.getElementById('plus').onclick=()=>adjust(1);
-direction.onclick=()=>{clockwise=!clockwise;direction.textContent='Направление: '+(clockwise?'по часовой':'против часовой');};
-start.onclick=async()=>{if(busy)return;let v=Number(input.value);if(!Number.isInteger(v)||v<1||v>1000){status.textContent='Введите целое число от 1 до 1000.';return;}
-busy=true;start.disabled=true;try{pendingMove=fetch('/move',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({revolutions:String(v),direction:clockwise?'1':'0'})});let r=await pendingMove;if(!r.ok)throw new Error(await r.text());if(!stopping)status.textContent='Двигатель вращается…';}catch(e){if(!stopping)status.textContent='Не удалось запустить: '+e.message;busy=false;}finally{pendingMove=null;if(!stopping)start.disabled=busy;}};
-document.getElementById('stop').onclick=async()=>{if(stopping)return;stopping=true;start.disabled=true;status.textContent='Отправка команды остановки…';const inFlight=pendingMove;
-try{let r=await fetch('/stop',{method:'POST'});if(!r.ok)throw new Error(await r.text());if(inFlight){try{await inFlight;}catch(e){} r=await fetch('/stop',{method:'POST'});if(!r.ok)throw new Error(await r.text());}busy=false;status.textContent='Двигатель остановлен.';}catch(e){busy=true;status.textContent='Не удалось подтвердить остановку: '+e.message;}finally{stopping=false;start.disabled=busy;}};
-async function update(){try{let r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw new Error('Ошибка соединения');let s=await r.json();if(!stopping && !pendingMove){busy=s.busy;start.disabled=busy;if(!busy && status.textContent==='Двигатель вращается…')status.textContent='Вращение завершено.';}}catch(e){start.disabled=true;if(!stopping)status.textContent='Нет связи с устройством.';}setTimeout(update,1000);}update();
-</script></main></body></html>)HTML";
+extern const char PAGE[] asm("_binary_src_index_html_start");
+
+void IRAM_ATTR onStepTimer() {
+  portENTER_CRITICAL_ISR(&motorMux);
+  if (motor.busy() && static_cast<uint32_t>(micros() - moveStartedAt) >= STEP_INTERVAL_US) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(STEP_PIN, LOW);
+    motor.step();
+  }
+  portEXIT_CRITICAL_ISR(&motorMux);
+}
+
+bool motorBusy() {
+  portENTER_CRITICAL(&motorMux);
+  bool busy = motor.busy();
+  portEXIT_CRITICAL(&motorMux);
+  return busy;
+}
+
+String commandToken() {
+  return String(gate.boot()) + "-" + String(gate.version());
+}
 
 bool authorize() {
   if (server.authenticate(WEB_USER, WEB_PASSWORD)) return true;
@@ -56,7 +57,11 @@ void handleMove() {
     server.send(403, "text/plain; charset=utf-8", "Недопустимый источник запроса");
     return;
   }
-  if (motor.busy()) {
+  if (!stepTimer) {
+    server.send(503, "text/plain; charset=utf-8", "Таймер двигателя недоступен");
+    return;
+  }
+  if (motorBusy()) {
     server.send(409, "text/plain; charset=utf-8", "Двигатель уже вращается");
     return;
   }
@@ -67,9 +72,16 @@ void handleMove() {
     server.send(400, "text/plain; charset=utf-8", "Некорректные параметры");
     return;
   }
+  if (server.arg("token") != commandToken()) {
+    server.send(409, "text/plain; charset=utf-8", "Команда устарела");
+    return;
+  }
+  gate.accept(gate.boot(), gate.version());
+  portENTER_CRITICAL(&motorMux);
   digitalWrite(DIR_PIN, direction == "1" ? HIGH : LOW);
-  lastStep = micros();
+  moveStartedAt = micros();
   motor.start(steps);
+  portEXIT_CRITICAL(&motorMux);
   server.send(200, "text/plain; charset=utf-8", "Запущено");
 }
 
@@ -79,8 +91,11 @@ void handleStop() {
     server.send(403, "text/plain; charset=utf-8", "Недопустимый источник запроса");
     return;
   }
+  gate.stop();
+  portENTER_CRITICAL(&motorMux);
   motor.stop();
   digitalWrite(STEP_PIN, LOW);
+  portEXIT_CRITICAL(&motorMux);
   server.send(200, "text/plain; charset=utf-8", "Остановлено");
 }
 
@@ -91,13 +106,28 @@ void setup() {
   digitalWrite(DIR_PIN, LOW);
   delay(100);
   Serial.begin(115200);
+  stepTimer = timerBegin(1000000);
+  if (stepTimer) {
+    timerAttachInterrupt(stepTimer, &onStepTimer);
+    timerAlarm(stepTimer, STEP_INTERVAL_US, true, 0);
+  } else {
+    Serial.println("Motor timer initialization failed");
+  }
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAP(WIFI_NAME, WIFI_PASSWORD)) Serial.println("Wi-Fi AP failed");
+  gate = CommandGate(esp_random());
   Serial.print("Open http://"); Serial.println(WiFi.softAPIP());
   const char* headers[] = {"Origin"};
   server.collectHeaders(headers, 1);
   server.on("/", HTTP_GET, []() { if (authorize()) server.send_P(200, "text/html; charset=utf-8", PAGE); });
-  server.on("/status", HTTP_GET, []() { if (authorize()) server.send(200, "application/json", motor.busy() ? "{\"busy\":true}" : "{\"busy\":false}"); });
+  server.on("/status", HTTP_GET, []() {
+    if (!authorize()) return;
+    String state = motorBusy() ? "{\"busy\":true" : "{\"busy\":false";
+    state += ",\"ready\":";
+    state += stepTimer ? "true" : "false";
+    state += ",\"token\":\"" + commandToken() + "\"}";
+    server.send(200, "application/json", state);
+  });
   server.on("/move", HTTP_POST, handleMove);
   server.on("/stop", HTTP_POST, handleStop);
   server.begin();
@@ -105,12 +135,4 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  uint32_t now = micros();
-  if (motor.busy() && static_cast<uint32_t>(now - lastStep) >= STEP_INTERVAL_US) {
-    lastStep = now;
-    digitalWrite(STEP_PIN, HIGH);
-    delayMicroseconds(STEP_PULSE_US);
-    digitalWrite(STEP_PIN, LOW);
-    motor.step();
-  }
 }
