@@ -3,6 +3,14 @@
 
 int main() {
   uint32_t steps = 0;
+  uint32_t interval = 0;
+  assert(parseSpeed("125", interval) && interval == 10000);
+  assert(parseSpeed("25", interval) && interval == 50000);
+  assert(parseSpeed("250", interval) && interval == 5000);
+  assert(!parseSpeed("24", interval));
+  assert(!parseSpeed("251", interval));
+  assert(!parseSpeed("125.0", interval));
+  assert(!parseSpeed("", interval));
   assert(parseRevolutions("1", steps) && steps == 48);
   assert(parseRevolutions("5", steps) && steps == 240);
   assert(parseRevolutions("1000", steps) && steps == 48000);

@@ -28,3 +28,16 @@ inline bool parseRevolutions(const char* input, uint32_t& steps) {
   steps = revolutions * 48;
   return true;
 }
+
+inline bool parseSpeed(const char* input, uint32_t& intervalUs) {
+  if (!input || !*input) return false;
+  uint32_t rpm = 0;
+  for (const char* p = input; *p; ++p) {
+    if (*p < '0' || *p > '9') return false;
+    rpm = rpm * 10 + static_cast<uint32_t>(*p - '0');
+    if (rpm > 250) return false;
+  }
+  if (rpm < 25) return false;
+  intervalUs = 60000000UL / (rpm * 48UL);
+  return true;
+}

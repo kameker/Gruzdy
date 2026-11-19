@@ -19,13 +19,14 @@ MotorMove motor;
 portMUX_TYPE motorMux = portMUX_INITIALIZER_UNLOCKED;
 hw_timer_t* stepTimer = nullptr;
 uint32_t moveStartedAt = 0;
+uint32_t stepIntervalUs = STEP_INTERVAL_US;
 CommandGate gate(0);
 
 extern const char PAGE[] asm("_binary_src_index_html_start");
 
 void IRAM_ATTR onStepTimer() {
   portENTER_CRITICAL_ISR(&motorMux);
-  if (motor.busy() && static_cast<uint32_t>(micros() - moveStartedAt) >= STEP_INTERVAL_US) {
+  if (motor.busy() && static_cast<uint32_t>(micros() - moveStartedAt) >= stepIntervalUs) {
     digitalWrite(STEP_PIN, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(STEP_PIN, LOW);
@@ -66,9 +67,12 @@ void handleMove() {
     return;
   }
   uint32_t steps = 0;
+  uint32_t intervalUs = 0;
   const String revolutions = server.arg("revolutions");
   const String direction = server.arg("direction");
-  if (!parseRevolutions(revolutions.c_str(), steps) || (direction != "0" && direction != "1")) {
+  if (!parseRevolutions(revolutions.c_str(), steps) ||
+      !parseSpeed(server.arg("speed").c_str(), intervalUs) ||
+      (direction != "0" && direction != "1")) {
     server.send(400, "text/plain; charset=utf-8", "Некорректные параметры");
     return;
   }
@@ -77,11 +81,16 @@ void handleMove() {
     return;
   }
   gate.accept(gate.boot(), gate.version());
+  timerStop(stepTimer);
+  timerWrite(stepTimer, 0);
+  timerAlarm(stepTimer, intervalUs, true, 0);
   portENTER_CRITICAL(&motorMux);
   digitalWrite(DIR_PIN, direction == "1" ? HIGH : LOW);
+  stepIntervalUs = intervalUs;
   moveStartedAt = micros();
   motor.start(steps);
   portEXIT_CRITICAL(&motorMux);
+  timerStart(stepTimer);
   server.send(200, "text/plain; charset=utf-8", "Запущено");
 }
 

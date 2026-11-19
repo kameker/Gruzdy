@@ -4,19 +4,20 @@ const vm = require('node:vm');
 
 const html = fs.readFileSync('src/index.html', 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-const elements = Object.fromEntries(['revs', 'status', 'start', 'direction', 'minus', 'plus', 'stop'].map(id => [id, { value: '5', disabled: false, textContent: '' }]));
+const elements = Object.fromEntries(['revs', 'speed', 'status', 'start', 'direction', 'minus', 'plus', 'stop'].map(id => [id, { value: id === 'speed' ? '125' : '5', disabled: false, textContent: '' }]));
 let resolveStop;
 const stopResponse = new Promise(resolve => { resolveStop = resolve; });
 let token = '123-0';
 let stopCalls = 0;
+let submittedMove;
 const response = data => ({ ok: true, json: async () => data, text: async () => '' });
 const context = {
   document: { getElementById: id => elements[id] },
   URLSearchParams, AbortController,
   setTimeout: () => 0, clearTimeout: () => {},
-  fetch: async (url) => {
+  fetch: async (url, options) => {
     if (url === '/status') return response({ busy: false, ready: true, token });
-    if (url === '/move') throw new Error('response lost');
+    if (url === '/move') { submittedMove = options.body; throw new Error('response lost'); }
     if (url === '/stop') { stopCalls++; return stopResponse; }
     throw new Error('unexpected request');
   },
@@ -26,8 +27,13 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 (async () => {
   vm.runInNewContext(script, context);
   await flush();
+  elements.speed.value = '251';
+  await elements.start.onclick();
+  assert.equal(submittedMove, undefined, 'invalid speed must not start a move');
+  elements.speed.value = '75';
   const start = elements.start.onclick();
   await flush();
+  assert.equal(submittedMove.get('speed'), '75', 'selected speed must be sent with the move');
   assert.equal(elements.start.disabled, true, 'start must remain disabled after an uncertain move');
   assert.equal(stopCalls, 1, 'an uncertain move must be cancelled before re-enabling start');
   token = '123-1';
@@ -40,7 +46,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   let finishMove;
   const lateMove = new Promise(resolve => { finishMove = resolve; });
   let revision = '123-0';
-  const other = Object.fromEntries(Object.keys(elements).map(id => [id, { value: '5', disabled: false, textContent: '' }]));
+  const other = Object.fromEntries(Object.keys(elements).map(id => [id, { value: id === 'speed' ? '125' : '5', disabled: false, textContent: '' }]));
   const second = {
     ...context,
     document: { getElementById: id => other[id] },
@@ -63,7 +69,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(other.status.textContent, 'Двигатель остановлен.');
   console.log('Stop while starting: PASS');
 
-  const thirdElements = Object.fromEntries(Object.keys(elements).map(id => [id, { value: '5', disabled: false, textContent: '' }]));
+  const thirdElements = Object.fromEntries(Object.keys(elements).map(id => [id, { value: id === 'speed' ? '125' : '5', disabled: false, textContent: '' }]));
   const third = {
     ...context,
     document: { getElementById: id => thirdElements[id] },

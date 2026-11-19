@@ -90,6 +90,9 @@
         /><button id="minus" type="button" aria-label="Уменьшить">−</button
         ><button id="plus" type="button" aria-label="Увеличить">+</button>
       </div>
+      <label for="speed">Скорость (об/мин, 25–250)</label>
+      <input id="speed" type="number" min="25" max="250" step="1" value="125" />
+      <small>Скорость применяется при следующем запуске.</small>
       <button id="direction" class="wide" type="button">
         Направление: по часовой
       </button>
@@ -101,6 +104,7 @@
         let pendingMove = false, stopping = false, uncertain = false, generation = 0;
         let stopPromise = null;
         const input = document.getElementById("revs"),
+          speed = document.getElementById("speed"),
           status = document.getElementById("status");
         const start = document.getElementById("start"),
           direction = document.getElementById("direction");
@@ -181,6 +185,11 @@
             status.textContent = "Введите целое число от 1 до 1000.";
             return;
           }
+          const rpm = Number(speed.value);
+          if (!Number.isInteger(rpm) || rpm < 25 || rpm > 250) {
+            status.textContent = "Введите скорость целым числом от 25 до 250 об/мин.";
+            return;
+          }
           const moveToken = token;
           const moveGeneration = ++generation;
           pendingMove = true;
@@ -190,7 +199,7 @@
             const r = await request("/move", {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: new URLSearchParams({ revolutions: String(v), direction: clockwise ? "1" : "0", token: moveToken }),
+              body: new URLSearchParams({ revolutions: String(v), speed: String(rpm), direction: clockwise ? "1" : "0", token: moveToken }),
             });
             if (moveGeneration !== generation) return;
             if (!r.ok) {
